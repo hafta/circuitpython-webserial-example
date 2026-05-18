@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Web Serial Writer</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+  .row { display: flex; gap: 0.5em; margin-bottom: 0.5em; }
+  .row input { flex: 1; padding: 0.5em; font-size: 1em; }
+  button { padding: 0.5em 1em; font-size: 1em; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #log { background: #111; color: #0f0; font-family: ui-monospace, monospace; padding: 0.75em; height: 240px; overflow-y: auto; white-space: pre-wrap; }
+  .hint { color: #666; }
+  .err { color: #c00; }
+  #ledOn { margin-left: auto; }
+</style>
+</head>
+<body>
+  <h1>Web Serial Writer</h1>
+  <div class="row">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span id="status" class="hint">Disconnected</span>
+    <button id="ledOn" disabled>LED On</button>
+    <button id="ledOff" disabled>LED Off</button>
+  </div>
+  <form id="sendForm">
+    <div class="row">
+      <input id="input" type="text" placeholder="Type a command, e.g. echo hello" autocomplete="off" disabled>
+      <button id="send" type="submit" disabled>Send</button>
+    </div>
+  </form>
+  <div id="log"></div>
+  <p id="unsupported" class="err" hidden>
+    Web Serial is not supported in this browser. Use Firefox 151+ or a Chromium-based browser 89+.
+  </p>
+<script>
+const connectBtn = document.getElementById('connect');
+const disconnectBtn = document.getElementById('disconnect');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const ledOnBtn = document.getElementById('ledOn');
+const ledOffBtn = document.getElementById('ledOff');
+const form = document.getElementById('sendForm');
+const log = document.getElementById('log');
+const status = document.getElementById('status');
+
+let port = null;
+let writer = null;
+let reader = null;
+let readLoopPromise = null;
+
+if (!('serial' in navigator)) {
+  document.getElementById('unsupported').hidden = false;
+  connectBtn.disabled = true;
+}
+
+function append(line, cls) {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = line + '\n';
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setConnected(connected) {
+  connectBtn.disabled = connected;
+  disconnectBtn.disabled = !connected;
+  input.disabled = !connected;
+  sendBtn.disabled = !connected;
+  ledOnBtn.disabled = !connected;
+  ledOffBtn.disabled = !connected;
+  status.textContent = connected ? 'Connected' : 'Disconnected';
+}
+
+async function connect() {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    setConnected(true);
+    append('[connected]');
+    readLoopPromise = readLoop();
+  } catch (e) {
+    append('[connect failed] ' + e.message, 'err');
+  }
+}
+
+async function readLoop() {
+  const decoder = new TextDecoderStream();
+  const readableClosed = port.readable.pipeTo(decoder.writable).catch(() => {});
+  reader = decoder.readable.getReader();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let idx;
+      while ((idx = buffer.search(/\r\n|\n|\r/)) >= 0) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + (buffer.startsWith('\r\n', idx) ? 2 : 1));
+        if (line.length > 0) append('< ' + line);
+      }
+    }
+  } catch (e) {
+    append('[read error] ' + e.message, 'err');
+  } finally {
+    try { reader.releaseLock(); } catch (_) {}
+    await readableClosed;
+    setConnected(false);
+  }
+}
+
+async function disconnect() {
+  try {
+    if (reader) {
+      try { await reader.cancel(); } catch (_) {}
+    }
+    if (writer) {
+      try { await writer.close(); } catch (_) {}
+      writer = null;
+    }
+    if (readLoopPromise) {
+      try { await readLoopPromise; } catch (_) {}
+      readLoopPromise = null;
+    }
+    if (port) {
+      try { await port.close(); } catch (_) {}
+      port = null;
+    }
+  } catch (e) {
+    append('[disconnect error] ' + e.message, 'err');
+  }
+  setConnected(false);
+  append('[disconnected]');
+}
+
+async function send(cmd) {
+  if (!writer) return;
+  try {
+    const data = new TextEncoder().encode(cmd + '\n');
+    await writer.write(data);
+    append('> ' + cmd);
+  } catch (e) {
+    append('[write error] ' + e.message, 'err');
+  }
+}
+
+connectBtn.addEventListener('click', connect);
+disconnectBtn.addEventListener('click', disconnect);
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const value = input.value.trim();
+  if (!value) return;
+  send(value);
+  input.value = '';
+});
+ledOnBtn.addEventListener('click', () => send('led on'));
+ledOffBtn.addEventListener('click', () => send('led off'));
+</script>
+</body>
+</html>
